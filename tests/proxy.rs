@@ -18,6 +18,9 @@ use tokio::net::TcpListener;
 /// The openapi.yaml example key: base64 `+`, `/`, `=` plus `:` separators.
 const KEY: &str = "aa:9Ur1MdQmPZZbOLudX+0T2lAbouGfiPZH1GQOIRyp88Y=d:4VI0nln7iw2mu3QIYzOuKkK9973ltBVMr6Rra6VrfSU=:eoYNTZIaNEumvCYOW4JCGkUhl7iv/6HpXUuvbGt+Tk0=:rk";
 const CDH: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+/// 69 bytes, the size of a full assertion message (`authData || clientDataHash`)
+/// that contract 0.2.0 lets a client sign.
+const MESSAGE: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNE";
 
 /// `METHOD raw-path` for every request the mock aaoracled received.
 type Seen = Arc<Mutex<Vec<String>>>;
@@ -89,8 +92,9 @@ async fn call(request: reqwest::RequestBuilder, body: Option<Value>) -> (u16, Va
     (status, serde_json::from_slice(&response.bytes().await.unwrap()).unwrap())
 }
 
-/// Stand-in for aaoracled with the same dispatch as oracled.m's `route()`:
-/// raw path, prefix/suffix matching, then percent-decoding of the key.
+/// Stand-in for aaoracled (contract 0.2.0) with the same dispatch as
+/// oracled.m's `route()`: raw path, prefix/suffix matching, then
+/// percent-decoding of the key.
 async fn mock_aaoracled(seen: Seen, method: Method, uri: Uri, body: Bytes) -> (StatusCode, axum::Json<Value>) {
     let path = uri.path().to_owned();
     seen.lock().unwrap().push(format!("{method} {path}"));
@@ -98,19 +102,31 @@ async fn mock_aaoracled(seen: Seen, method: Method, uri: Uri, body: Bytes) -> (S
     let decode = |raw: &str| percent_decode_str(raw).decode_utf8().unwrap().into_owned();
 
     let (status, json) = if method == Method::GET && path == "/health" {
-        (200, json!({ "ok": true, "appAttestSupported": true, "defaultEnvironment": "development" }))
+        (200, json!({
+            "ok": true, "appAttestSupported": true,
+            "supportedEnvironments": ["development", "production"], "environmentForgery": true,
+        }))
     } else if method == Method::GET && path == "/keys" {
-        (200, json!({ "keys": [KEY, "aa:other"] }))
+        (200, json!({ "keys": [
+            { "key": KEY, "environment": "development" },
+            { "key": "aa:other", "environment": null },
+        ] }))
     } else if method == Method::POST && path == "/keys" {
         let app_id = body["appId"].as_str().unwrap_or_default();
-        if app_id.starts_with("ZZZZZZZZZZ.") {
-            (502, json!({ "error": "attestKey_failed", "detail": "DCErrorInvalidKey" }))
-        } else {
-            let environment = body["environment"].as_str().unwrap_or("development");
-            (201, json!({
+        let environment = match body.get("environment") {
+            None => Some("development"),
+            Some(Value::String(e)) if e == "development" || e == "production" => Some(e.as_str()),
+            Some(_) => None,
+        };
+        match environment {
+            None => (400, json!({ "error": "bad_request", "detail": "environment must be \"development\" or \"production\"" })),
+            Some(_) if app_id.starts_with("ZZZZZZZZZZ.") => {
+                (502, json!({ "error": "attestKey_failed", "detail": "DCErrorInvalidKey" }))
+            }
+            Some(environment) => (201, json!({
                 "keyId": "a2V5aWQ=", "appId": app_id, "environment": environment,
                 "attestation": "YXR0ZXN0YXRpb24=", "counter": 0,
-            }))
+            })),
         }
     } else if method == Method::POST && path.starts_with("/keys/") && path.ends_with("/sign") {
         (200, json!({ "key": decode(&path[6..path.len() - 5]), "signature": "c2lnbmF0dXJl" }))
@@ -212,6 +228,20 @@ async fn rejected_create_key_is_relayed_and_metered() {
 }
 
 #[tokio::test]
+async fn rejected_environment_is_relayed_and_metered() {
+    let h = Harness::new().await;
+    let body = json!({ "appId": "ABCDE12345.com.example.target", "environment": "staging", "clientDataHash": CDH });
+    let (status, response) = call(h.request(Method::POST, "/keys"), Some(body)).await;
+    assert_eq!(status, 400);
+    assert_eq!(response["error"], "bad_request");
+
+    let row = h.db().query_row("SELECT status, error, environment, key_id FROM key_creations", [], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?))
+    });
+    assert_eq!(row.unwrap(), (400, "bad_request".into(), "staging".into(), None));
+}
+
+#[tokio::test]
 async fn sign_and_delete_pass_the_raw_key_through() {
     let h = Harness::new().await;
     let encoded = utf8_percent_encode(KEY, NON_ALPHANUMERIC).to_string();
@@ -221,7 +251,7 @@ async fn sign_and_delete_pass_the_raw_key_through() {
         .request(Method::POST, &sign_path)
         .header("X-Forwarded-For", "192.0.2.1")
         .header("X-Forwarded-For", "192.0.2.2, 192.0.2.3,");
-    let (status, response) = call(request, Some(json!({ "clientDataHash": CDH }))).await;
+    let (status, response) = call(request, Some(json!({ "clientDataHash": MESSAGE }))).await;
     assert_eq!(status, 200);
     assert_eq!(response["key"], KEY);
 
@@ -237,7 +267,7 @@ async fn sign_and_delete_pass_the_raw_key_through() {
         Ok([0, 1, 2, 3].map(|i| r.get::<_, String>(i).unwrap()))
     });
     // Last entry of the last X-Forwarded-For header.
-    assert_eq!(signing.unwrap(), ["192.0.2.3", KEY, CDH, "c2lnbmF0dXJl"]);
+    assert_eq!(signing.unwrap(), ["192.0.2.3", KEY, MESSAGE, "c2lnbmF0dXJl"]);
     let deletion = db.query_row("SELECT source_ip, key, deleted FROM key_deletions", [], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))
     });
@@ -249,11 +279,16 @@ async fn sign_and_delete_pass_the_raw_key_through() {
 async fn health_and_listing_are_metered_into_the_timeline() {
     let h = Harness::new().await;
     assert_eq!(call(h.request(Method::GET, "/health"), None).await.1["appAttestSupported"], true);
-    assert_eq!(call(h.request(Method::GET, "/keys"), None).await.1["keys"][0], KEY);
+    let keys = call(h.request(Method::GET, "/keys"), None).await.1;
+    assert_eq!(keys["keys"][0], json!({ "key": KEY, "environment": "development" }));
 
     let db = h.db();
-    let supported: bool = db.query_row("SELECT app_attest_supported FROM health_checks", [], |r| r.get(0)).unwrap();
-    assert!(supported);
+    let health = db.query_row(
+        "SELECT app_attest_supported, supported_environments, environment_forgery FROM health_checks",
+        [],
+        |r| Ok((r.get::<_, bool>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)),
+    );
+    assert_eq!(health.unwrap(), (true, r#"["development","production"]"#.into(), true));
     let key_count: i64 = db.query_row("SELECT key_count FROM key_listings", [], |r| r.get(0)).unwrap();
     assert_eq!(key_count, 2);
 

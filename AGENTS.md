@@ -17,9 +17,10 @@ Keep Git commit signing enabled; never disable it.
 
 ## Rules
 
-- **The contract is `../aaoracled/openapi.yaml`.** Don't fork a copy into
-  this repo. If the contract changes there, update `src/proxy.rs`'s `Route`
-  (and the metering in `action()`) to match.
+- **The contract is `../aaoracled/openapi.yaml`; aameterd tracks 0.2.0.**
+  Don't fork a copy into this repo. If the contract changes there, update
+  `src/proxy.rs`'s `Route` (and the metering in `action()`), plus the mock
+  in `tests/proxy.rs`, to match.
 - **`Route::parse` mirrors `oracled.m`'s `route()`, quirks included.** It
   matches on the raw, still-percent-encoded path and forwards the key
   segment byte-for-byte, so aaoracled does its own decoding. Don't swap it
@@ -29,9 +30,14 @@ Keep Git commit signing enabled; never disable it.
 - **Metering never fails a request.** Log the error and return aaoracled's
   answer anyway.
 - **Schema changes go in `src/schema.sql`.** Every table keeps the shared
-  leading columns, and so does the `requests` view. The schema is applied
-  with `CREATE ... IF NOT EXISTS`, which won't alter existing tables, so a
-  column change to a table needs a real migration (`PRAGMA user_version`).
+  leading columns, and so does the `requests` view. `CREATE ... IF NOT
+  EXISTS` won't alter an existing table, so changing one also takes a new
+  entry at the end of `MIGRATIONS` in `src/meter.rs`, leaving the table
+  exactly as `schema.sql` declares it (new columns go last, where `ALTER
+  TABLE ADD COLUMN` puts them). `PRAGMA user_version` counts applied
+  migrations. `tests/meter.rs` migrates the 0.1.0 schema
+  (`tests/fixtures/schema-v0.sql`, never edit it) and checks the result
+  matches a new database.
 
 ## Commands
 

@@ -9,6 +9,17 @@ use rusqlite::types::Value;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
+/// Upgrades for databases created by older aameterd versions, in order;
+/// `PRAGMA user_version` counts how many a database has had applied. A new
+/// database gets the current `SCHEMA` directly and starts at the latest
+/// version, so each entry must leave a table exactly as `SCHEMA` now
+/// declares it.
+const MIGRATIONS: &[&str] = &[
+    // Contract 0.2.0: GET /health's supportedEnvironments and environmentForgery.
+    "ALTER TABLE health_checks ADD COLUMN supported_environments TEXT;
+     ALTER TABLE health_checks ADD COLUMN environment_forgery INTEGER;",
+];
+
 /// Who sent a request and when; recorded identically for every operation.
 #[derive(Debug, Clone)]
 pub struct RequestMeta {
@@ -33,6 +44,9 @@ pub struct Outcome {
 pub enum Action {
     Health {
         app_attest_supported: Option<bool>,
+        /// JSON array text, e.g. `["development","production"]`.
+        supported_environments: Option<String>,
+        environment_forgery: Option<bool>,
     },
     ListKeys {
         key_count: Option<i64>,
@@ -61,9 +75,13 @@ impl Action {
     /// The table this action is metered into, plus its own columns.
     fn row(&self) -> (&'static str, Vec<(&'static str, Value)>) {
         match self {
-            Self::Health { app_attest_supported } => (
+            Self::Health { app_attest_supported, supported_environments, environment_forgery } => (
                 "health_checks",
-                vec![("app_attest_supported", (*app_attest_supported).into())],
+                vec![
+                    ("app_attest_supported", (*app_attest_supported).into()),
+                    ("supported_environments", supported_environments.clone().into()),
+                    ("environment_forgery", (*environment_forgery).into()),
+                ],
             ),
             Self::ListKeys { key_count } => {
                 ("key_listings", vec![("key_count", (*key_count).into())])
@@ -110,13 +128,14 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// Opens (creating if needed) the database at `path` and applies the schema.
-    pub fn open(path: &Path) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
+    /// Opens (creating if needed) the database at `path` and brings its
+    /// schema up to date.
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        let mut conn = Connection::open(path)?;
         // WAL so the database can be queried while aameterd keeps writing.
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch(SCHEMA)?;
+        migrate(&mut conn)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -146,4 +165,31 @@ impl Meter {
         conn.execute(&sql, rusqlite::params_from_iter(columns.iter().map(|(_, value)| value)))?;
         Ok(())
     }
+}
+
+/// Applies whichever `MIGRATIONS` an existing database is missing, then
+/// `SCHEMA` (creating everything for a new database), in one transaction.
+fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
+    let tx = conn.transaction()?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let latest = MIGRATIONS.len();
+    let Some(pending) = usize::try_from(version).ok().and_then(|v| MIGRATIONS.get(v..)) else {
+        anyhow::bail!("database is at schema version {version}, newer than this aameterd's {latest}");
+    };
+    // Before user_version existed (0.1.0), every database was at version 0,
+    // so a version-0 database that already has tables needs every migration.
+    let existing: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'health_checks')",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing {
+        for migration in pending {
+            tx.execute_batch(migration)?;
+        }
+    }
+    tx.execute_batch(SCHEMA)?;
+    tx.pragma_update(None, "user_version", latest as i64)?;
+    tx.commit()?;
+    Ok(())
 }

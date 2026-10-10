@@ -19,18 +19,23 @@
 --   error            `error` code from an error response body, if any.
 --   duration_ms      Time spent waiting on aaoracled.
 
+-- Adding a column to an existing table also needs an entry in meter.rs's
+-- MIGRATIONS: CREATE TABLE IF NOT EXISTS leaves existing tables alone.
+
 CREATE TABLE IF NOT EXISTS health_checks (            -- GET /health
-    id                   INTEGER PRIMARY KEY,
-    requested_at         TEXT    NOT NULL,
-    source_ip            TEXT    NOT NULL,
-    peer_addr            TEXT    NOT NULL,
-    x_forwarded_for      TEXT,
-    x_real_ip            TEXT,
-    user_agent           TEXT,
-    status               INTEGER NOT NULL,
-    error                TEXT,
-    duration_ms          INTEGER NOT NULL,
-    app_attest_supported INTEGER                      -- response's appAttestSupported (0/1)
+    id                     INTEGER PRIMARY KEY,
+    requested_at           TEXT    NOT NULL,
+    source_ip              TEXT    NOT NULL,
+    peer_addr              TEXT    NOT NULL,
+    x_forwarded_for        TEXT,
+    x_real_ip              TEXT,
+    user_agent             TEXT,
+    status                 INTEGER NOT NULL,
+    error                  TEXT,
+    duration_ms            INTEGER NOT NULL,
+    app_attest_supported   INTEGER,                   -- response's appAttestSupported (0/1)
+    supported_environments TEXT,                      -- response's supportedEnvironments, as a JSON array
+    environment_forgery    INTEGER                    -- response's environmentForgery (0/1)
 );
 
 CREATE TABLE IF NOT EXISTS key_listings (             -- GET /keys
@@ -61,7 +66,7 @@ CREATE TABLE IF NOT EXISTS key_creations (            -- POST /keys
     app_id           TEXT,                            -- requested appId, verbatim
     team_id          TEXT,                            -- app_id before its first '.'
     bundle_id        TEXT,                            -- app_id after its first '.'
-    environment      TEXT,                            -- requested environment; NULL = omitted (development)
+    environment      TEXT,                            -- requested environment; NULL if omitted (development) or not a string
     client_data_hash TEXT,                            -- requested clientDataHash (base64), verbatim
     key_id           TEXT,                            -- response's keyId (base64); NULL unless minted
     attestation      TEXT                             -- response's attestation (base64 CBOR); NULL unless minted

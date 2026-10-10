@@ -167,6 +167,11 @@ fn action(route: &Route, request: Option<&Value>, response: Option<&Value>) -> A
     match route {
         Route::GetHealth => Action::Health {
             app_attest_supported: response.and_then(|v| v.get("appAttestSupported")?.as_bool()),
+            supported_environments: response
+                .and_then(|v| v.get("supportedEnvironments"))
+                .filter(|environments| environments.is_array())
+                .map(Value::to_string),
+            environment_forgery: response.and_then(|v| v.get("environmentForgery")?.as_bool()),
         },
         Route::ListKeys => Action::ListKeys {
             key_count: response.and_then(|v| Some(v.get("keys")?.as_array()?.len() as i64)),
