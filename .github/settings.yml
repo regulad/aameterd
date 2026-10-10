@@ -1,0 +1,69 @@
+# Repository configuration, managed by the Probot Settings app
+# (https://github.com/probot/settings). Changes here are applied to the
+# repo's GitHub-side settings automatically on merge to the default branch.
+repository:
+  name: aameterd
+  description: >-
+    Metering proxy for aaoracled: serves the same App Attest oracle HTTP
+    contract, forwards every request to a real aaoracled, and records each
+    one into SQLite for analyzing an app's devicecheckd traffic.
+  homepage: ""
+
+  private: false
+
+  # Topics: comma-and-space separated string, NOT a YAML list — the
+  # Probot Settings schema takes `topics` as one string it splits itself.
+  topics: ios, security-research, app-attest, devicecheck, reverse-engineering, proxy, rust, sqlite, docker
+
+  has_issues: true
+  has_projects: false
+  has_wiki: false
+  has_downloads: true
+  has_discussions: false
+
+  default_branch: master
+
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: true
+  allow_auto_merge: false
+  delete_branch_on_merge: true
+
+  allow_update_branch: true
+
+  squash_merge_commit_title: PR_TITLE
+  squash_merge_commit_message: PR_BODY
+
+  archived: false
+  is_template: false
+
+# Labels this repo uses. `color` is a hex string without the leading `#`.
+labels:
+  - name: bug
+    color: "d73a4a"
+    description: Something isn't working as expected
+  - name: enhancement
+    color: "a2eeef"
+    description: New feature or capability
+  - name: research
+    color: "5319e7"
+    description: Investigation/finding, not necessarily code
+  - name: documentation
+    color: "0075ca"
+    description: Improvements or additions to AGENTS.md/README/docs
+  - name: infra
+    color: "fbca04"
+    description: Build, CI, container, or deployment work
+  - name: question
+    color: "d876e3"
+    description: Further information is requested
+  - name: wontfix
+    color: "ffffff"
+    description: This will not be worked on
+  - name: duplicate
+    color: "cfd3d7"
+    description: This issue or PR already exists
+
+# No branch-protection rules — solo-maintainer research repo, direct pushes
+# to the default branch are expected. Add rules here if that changes.
+branches: []

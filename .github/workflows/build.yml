@@ -1,0 +1,58 @@
+# Build the aameterd image for linux/amd64 and linux/arm64 and publish it
+# to ghcr.io/regulad/aameterd (the image compose.yaml runs).
+#
+# docker/github-builder handles checkout (via BuildKit git-context), buildx,
+# registry login, metadata, native per-platform builds (arm64 on GitHub's
+# real arm64 runners, amd64 on ubuntu-24.04 -- no QEMU), manifest-list
+# merging, and signing -- all internally.
+# https://github.com/docker/github-builder
+#
+# The build context is the git tree, not a path: .dockerignore is NOT applied
+# (docker/cli#2827, docker/buildx#2353). That's harmless here since
+# everything it lists is gitignored too.
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: docker/github-builder/.github/workflows/build.yml@58cb9f5b71b1836d6f690c1e95effdeb9b98cb8a # v1.17.0
+    with:
+      output: image
+      # sign defaults to "auto", which signs iff push is true, so pull
+      # requests build without pushing or signing.
+      push: ${{ github.event_name != 'pull_request' }}
+      platforms: linux/amd64,linux/arm64
+      # Both architectures are required for the final manifest.
+      fail-fast: true
+      cache: true
+      cache-mode: max
+      meta-images: ghcr.io/${{ github.repository }}
+      meta-tags: |
+        type=raw,value=latest,enable={{is_default_branch}}
+        type=ref,event=branch
+        type=ref,event=tag
+        type=ref,event=pr
+        type=semver,pattern={{version}}
+        type=sha
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
