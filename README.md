@@ -35,15 +35,19 @@ be something that forwards to it, e.g. an SSH tunnel
 ## Metering
 
 Every request is a row in the table for its operation: `health_checks`,
-`key_listings`, `key_creations`, `key_signings`, or `key_deletions`. The
-`requests` view merges them into one timeline. Every row records:
+`key_creations`, `key_attestations`, `key_assertions`, `label_listings`, or
+`label_deletions` (plus `label_signings`, which only holds requests to the
+sign route that aaoracled 0.3.0 removed). The `requests` view merges them into
+one timeline. Every row records:
 
 - when the request arrived
 - the source IP (the last `X-Forwarded-For` entry, else `X-Real-Ip`, else
   the TCP peer)
 - the status and any error code
-- the operation's own fields, such as the app/team/bundle ID, key, and
-  client data hash
+- the operation's own fields, such as the app/team/bundle ID, keyId or
+  label, and client data hash
+
+Databases from older aameterd versions are upgraded in place on startup.
 
 The columns are documented in [`src/schema.sql`](src/schema.sql).
 

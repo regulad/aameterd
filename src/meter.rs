@@ -18,6 +18,17 @@ const MIGRATIONS: &[&str] = &[
     // Contract 0.2.0: GET /health's supportedEnvironments and environmentForgery.
     "ALTER TABLE health_checks ADD COLUMN supported_environments TEXT;
      ALTER TABLE health_checks ADD COLUMN environment_forgery INTEGER;",
+    // Contract 0.3.0: listing and deleting moved under /labels, and the
+    // label-addressed tables follow, so `key` only ever means a keyId.
+    // (key_attestations and key_assertions are new tables; SCHEMA adds them.)
+    "DROP INDEX IF EXISTS key_deletions_key;
+     DROP INDEX IF EXISTS key_signings_key;
+     ALTER TABLE key_listings RENAME TO label_listings;
+     ALTER TABLE label_listings RENAME COLUMN key_count TO label_count;
+     ALTER TABLE key_deletions RENAME TO label_deletions;
+     ALTER TABLE label_deletions RENAME COLUMN key TO label;
+     ALTER TABLE key_signings RENAME TO label_signings;
+     ALTER TABLE label_signings RENAME COLUMN key TO label;",
 ];
 
 /// Who sent a request and when; recorded identically for every operation.
@@ -39,7 +50,7 @@ pub struct Outcome {
     pub duration_ms: i64,
 }
 
-/// Operation-specific fields, one variant per table.
+/// Operation-specific fields, one variant per table that is still written.
 #[derive(Debug, Clone)]
 pub enum Action {
     Health {
@@ -47,9 +58,6 @@ pub enum Action {
         /// JSON array text, e.g. `["development","production"]`.
         supported_environments: Option<String>,
         environment_forgery: Option<bool>,
-    },
-    ListKeys {
-        key_count: Option<i64>,
     },
     CreateKey {
         app_id: Option<String>,
@@ -60,13 +68,29 @@ pub enum Action {
         key_id: Option<String>,
         attestation: Option<String>,
     },
-    SignKey {
-        key: String,
+    AttestKey {
+        key_id: String,
+        app_id: Option<String>,
+        team_id: Option<String>,
+        bundle_id: Option<String>,
         client_data_hash: Option<String>,
-        signature: Option<String>,
+        environment: Option<String>,
+        attestation: Option<String>,
     },
-    DeleteKey {
-        key: String,
+    AssertKey {
+        key_id: String,
+        app_id: Option<String>,
+        team_id: Option<String>,
+        bundle_id: Option<String>,
+        client_data_hash: Option<String>,
+        environment: Option<String>,
+        assertion: Option<String>,
+    },
+    ListLabels {
+        label_count: Option<i64>,
+    },
+    DeleteLabel {
+        label: String,
         deleted: Option<bool>,
     },
 }
@@ -83,9 +107,6 @@ impl Action {
                     ("environment_forgery", (*environment_forgery).into()),
                 ],
             ),
-            Self::ListKeys { key_count } => {
-                ("key_listings", vec![("key_count", (*key_count).into())])
-            }
             Self::CreateKey {
                 app_id,
                 team_id,
@@ -106,17 +127,52 @@ impl Action {
                     ("attestation", attestation.clone().into()),
                 ],
             ),
-            Self::SignKey { key, client_data_hash, signature } => (
-                "key_signings",
+            Self::AttestKey {
+                key_id,
+                app_id,
+                team_id,
+                bundle_id,
+                client_data_hash,
+                environment,
+                attestation,
+            } => (
+                "key_attestations",
                 vec![
-                    ("key", key.clone().into()),
+                    ("key_id", key_id.clone().into()),
+                    ("app_id", app_id.clone().into()),
+                    ("team_id", team_id.clone().into()),
+                    ("bundle_id", bundle_id.clone().into()),
                     ("client_data_hash", client_data_hash.clone().into()),
-                    ("signature", signature.clone().into()),
+                    ("environment", environment.clone().into()),
+                    ("attestation", attestation.clone().into()),
                 ],
             ),
-            Self::DeleteKey { key, deleted } => (
-                "key_deletions",
-                vec![("key", key.clone().into()), ("deleted", (*deleted).into())],
+            Self::AssertKey {
+                key_id,
+                app_id,
+                team_id,
+                bundle_id,
+                client_data_hash,
+                environment,
+                assertion,
+            } => (
+                "key_assertions",
+                vec![
+                    ("key_id", key_id.clone().into()),
+                    ("app_id", app_id.clone().into()),
+                    ("team_id", team_id.clone().into()),
+                    ("bundle_id", bundle_id.clone().into()),
+                    ("client_data_hash", client_data_hash.clone().into()),
+                    ("environment", environment.clone().into()),
+                    ("assertion", assertion.clone().into()),
+                ],
+            ),
+            Self::ListLabels { label_count } => {
+                ("label_listings", vec![("label_count", (*label_count).into())])
+            }
+            Self::DeleteLabel { label, deleted } => (
+                "label_deletions",
+                vec![("label", label.clone().into()), ("deleted", (*deleted).into())],
             ),
         }
     }
@@ -171,6 +227,10 @@ impl Meter {
 /// `SCHEMA` (creating everything for a new database), in one transaction.
 fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
     let tx = conn.transaction()?;
+    // The view holds no data and CREATE VIEW IF NOT EXISTS would keep a stale
+    // definition, so it's always rebuilt from SCHEMA. Dropping it first also
+    // keeps it out of the way of table renames below.
+    tx.execute_batch("DROP VIEW IF EXISTS requests;")?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let latest = MIGRATIONS.len();
     let Some(pending) = usize::try_from(version).ok().and_then(|v| MIGRATIONS.get(v..)) else {

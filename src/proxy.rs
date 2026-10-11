@@ -41,47 +41,65 @@ pub fn router(upstream: &str, timeout: Duration, meter: Meter) -> reqwest::Resul
 /// One contract operation, named after its openapi.yaml operationId.
 enum Route {
     GetHealth,
-    ListKeys,
     CreateKey,
-    /// The key exactly as it appeared in the path, still percent-encoded.
-    SignWithKey(String),
-    DeleteKey(String),
+    /// The keyId exactly as it appeared in the path, still percent-encoded.
+    AttestKey(String),
+    AssertKey(String),
+    ListLabels,
+    /// The label exactly as it appeared in the path, still percent-encoded.
+    DeleteLabel(String),
 }
 
 impl Route {
     /// Mirrors oracled.m's `route()`, including matching on the raw,
-    /// still-encoded path: a `/` inside a key reaches aaoracled the same way
-    /// whether or not the client encoded it as `%2F`.
+    /// still-encoded path: a `/` inside a keyId or label reaches aaoracled the
+    /// same way whether or not the client encoded it as `%2F`.
     fn parse(method: &Method, path: &str) -> Option<Self> {
         match (method, path) {
             (&Method::GET, "/health") => return Some(Self::GetHealth),
-            (&Method::GET, "/keys") => return Some(Self::ListKeys),
             (&Method::POST, "/keys") => return Some(Self::CreateKey),
+            (&Method::GET, "/labels") => return Some(Self::ListLabels),
             _ => {}
         }
-        let rest = path.strip_prefix("/keys/")?;
-        if *method == Method::POST && path.ends_with("/sign") {
-            Some(Self::SignWithKey(rest.strip_suffix("/sign").unwrap_or_default().to_owned()))
-        } else if *method == Method::DELETE {
-            Some(Self::DeleteKey(rest.to_owned()))
-        } else {
-            None
+        if let Some(rest) = path.strip_prefix("/keys/")
+            && *method == Method::POST
+        {
+            // Like oracled.m, the verb suffix may overlap the prefix's `/`, so
+            // `/keys/attest` routes here with an empty keyId.
+            let key_id = |verb: &str| rest.strip_suffix(verb).unwrap_or_default().to_owned();
+            if path.ends_with("/attest") {
+                return Some(Self::AttestKey(key_id("/attest")));
+            }
+            if path.ends_with("/assert") {
+                return Some(Self::AssertKey(key_id("/assert")));
+            }
         }
+        if let Some(rest) = path.strip_prefix("/labels/")
+            && *method == Method::DELETE
+        {
+            return Some(Self::DeleteLabel(rest.to_owned()));
+        }
+        None
     }
 
     fn operation_id(&self) -> &'static str {
         match self {
             Self::GetHealth => "getHealth",
-            Self::ListKeys => "listKeys",
             Self::CreateKey => "createKey",
-            Self::SignWithKey(_) => "signWithKey",
-            Self::DeleteKey(_) => "deleteKey",
+            Self::AttestKey(_) => "attestKey",
+            Self::AssertKey(_) => "assertKey",
+            Self::ListLabels => "listLabels",
+            Self::DeleteLabel(_) => "deleteLabel",
         }
     }
 
-    fn raw_key(&self) -> Option<&str> {
+    /// aaoracled's 400 detail for this route's path identifier, if it's empty.
+    fn missing_identifier(&self) -> Option<&'static str> {
         match self {
-            Self::SignWithKey(key) | Self::DeleteKey(key) => Some(key),
+            Self::AttestKey(key_id) | Self::AssertKey(key_id) if key_id.is_empty() => {
+                Some("keyId required in path (from POST /keys)")
+            }
+            Self::DeleteLabel(label) if label.is_empty() => Some("label required in path"),
             _ => None,
         }
     }
@@ -102,10 +120,9 @@ async fn handle(
     };
 
     let started = Instant::now();
-    let (status, response_body) = if route.raw_key() == Some("") {
-        // aaoracled answers this with the same 400 (or, for `/keys/sign`, an
-        // NSRangeException), so don't bother it.
-        let detail = "key required in path (from GET /keys)";
+    let (status, response_body) = if let Some(detail) = route.missing_identifier() {
+        // aaoracled answers this with the same 400 (or, for `/keys/attest`
+        // and `/keys/assert`, an NSRangeException), so don't bother it.
         (StatusCode::BAD_REQUEST, error_body("bad_request", Some(detail)))
     } else {
         match forward(&state, &method, uri.path(), &body).await {
@@ -173,34 +190,62 @@ fn action(route: &Route, request: Option<&Value>, response: Option<&Value>) -> A
                 .map(Value::to_string),
             environment_forgery: response.and_then(|v| v.get("environmentForgery")?.as_bool()),
         },
-        Route::ListKeys => Action::ListKeys {
-            key_count: response.and_then(|v| Some(v.get("keys")?.as_array()?.len() as i64)),
-        },
         Route::CreateKey => {
             let app_id = req("appId");
-            let (team_id, bundle_id) = match app_id.as_deref().and_then(|id| id.split_once('.')) {
-                Some((team, bundle)) => (Some(team.to_owned()), Some(bundle.to_owned())),
-                None => (None, None),
-            };
+            let (team_id, bundle_id) = split_app_id(app_id.as_deref());
             Action::CreateKey {
                 app_id,
                 team_id,
                 bundle_id,
                 environment: req("environment"),
+                // Neither is in contract 0.3.0's createKey; recorded anyway so
+                // a client still speaking 0.2.0 shows up as one.
                 client_data_hash: req("clientDataHash"),
                 key_id: resp("keyId"),
                 attestation: resp("attestation"),
             }
         }
-        Route::SignWithKey(raw) => Action::SignKey {
-            key: decode_key(raw),
-            client_data_hash: req("clientDataHash"),
-            signature: resp("signature"),
+        Route::AttestKey(raw) => {
+            let app_id = req("appId");
+            let (team_id, bundle_id) = split_app_id(app_id.as_deref());
+            Action::AttestKey {
+                key_id: decode_path_id(raw),
+                app_id,
+                team_id,
+                bundle_id,
+                client_data_hash: req("clientDataHash"),
+                environment: resp("environment"),
+                attestation: resp("attestation"),
+            }
+        }
+        Route::AssertKey(raw) => {
+            let app_id = req("appId");
+            let (team_id, bundle_id) = split_app_id(app_id.as_deref());
+            Action::AssertKey {
+                key_id: decode_path_id(raw),
+                app_id,
+                team_id,
+                bundle_id,
+                client_data_hash: req("clientDataHash"),
+                environment: resp("environment"),
+                assertion: resp("assertion"),
+            }
+        }
+        Route::ListLabels => Action::ListLabels {
+            label_count: response.and_then(|v| Some(v.get("labels")?.as_array()?.len() as i64)),
         },
-        Route::DeleteKey(raw) => Action::DeleteKey {
-            key: decode_key(raw),
+        Route::DeleteLabel(raw) => Action::DeleteLabel {
+            label: decode_path_id(raw),
             deleted: response.and_then(|v| v.get("deleted")?.as_bool()),
         },
+    }
+}
+
+/// `appId` split at its first `.` into team ID and bundle ID.
+fn split_app_id(app_id: Option<&str>) -> (Option<String>, Option<String>) {
+    match app_id.and_then(|id| id.split_once('.')) {
+        Some((team, bundle)) => (Some(team.to_owned()), Some(bundle.to_owned())),
+        None => (None, None),
     }
 }
 
@@ -235,9 +280,9 @@ fn header_values(headers: &HeaderMap, name: &str) -> Option<String> {
     (!values.is_empty()).then(|| values.join(", "))
 }
 
-/// Decodes a path key the way aaoracled does (`stringByRemovingPercentEncoding`:
-/// `%XX` only, `+` stays `+`).
-fn decode_key(raw: &str) -> String {
+/// Decodes a path keyId or label the way aaoracled does
+/// (`stringByRemovingPercentEncoding`: `%XX` only, `+` stays `+`).
+fn decode_path_id(raw: &str) -> String {
     percent_decode_str(raw).decode_utf8_lossy().into_owned()
 }
 
