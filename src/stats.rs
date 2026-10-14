@@ -12,25 +12,36 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
 
-use crate::meter::Meter;
+use crate::meter::{Counted, Meter};
 use crate::proxy::{error_body, json_response};
+
+/// One of the contract's counting operations.
+struct Count {
+    operation_id: &'static str,
+    path: &'static str,
+    counts: Counted,
+}
+
+const ATTESTATIONS: Count = Count { operation_id: "countAttestations", path: "/attestations", counts: Counted::AttestKey };
+const ASSERTIONS: Count = Count { operation_id: "countAssertions", path: "/assertions", counts: Counted::AssertKey };
 
 /// Builds the server for aameterd's own contract over `meter`'s database.
 /// It only reads; nothing here reaches aaoracled.
 pub fn router(meter: Meter) -> Router {
     Router::new()
-        .route("/attestations", get(count_attestations))
+        .route(ATTESTATIONS.path, get(async |meter, query| count(&ATTESTATIONS, meter, query).await))
+        .route(ASSERTIONS.path, get(async |meter, query| count(&ASSERTIONS, meter, query).await))
         .fallback(|| async { json_response(StatusCode::NOT_FOUND, error_body("not_found", None)) })
         .with_state(meter)
 }
 
-/// `GET /attestations` (`countAttestations`).
-async fn count_attestations(
+async fn count(
+    operation: &Count,
     State(meter): State<Meter>,
     query: Result<Query<Vec<(String, String)>>, QueryRejection>,
 ) -> Response {
     let window = match query {
-        Ok(Query(params)) => window(params),
+        Ok(Query(params)) => window(operation, params),
         Err(rejection) => Err(bad_request(&rejection.body_text())),
     };
     let (from, until) = match window {
@@ -38,24 +49,26 @@ async fn count_attestations(
         Err(body) => return json_response(StatusCode::BAD_REQUEST, body),
     };
 
-    let count = tokio::task::spawn_blocking(move || meter.count_attestations((from.start(), until.end()))).await;
+    let counts = operation.counts;
+    let count = tokio::task::spawn_blocking(move || meter.count(counts, (from.start(), until.end()))).await;
     let detail = match count {
         Ok(Ok(count)) => return json_response(StatusCode::OK, count.to_string().into()),
         Ok(Err(e)) => e.to_string(),
         Err(e) => e.to_string(),
     };
-    tracing::error!(error = %detail, operation = "countAttestations", "failed to read the metering database");
+    tracing::error!(error = %detail, operation = operation.operation_id, "failed to read the metering database");
     json_response(StatusCode::INTERNAL_SERVER_ERROR, error_body("database_error", Some(&detail)))
 }
 
 /// `from` and `until`, each sent exactly once, and no other parameter.
-fn window(params: Vec<(String, String)>) -> Result<(Timestamp, Timestamp), Bytes> {
+fn window(operation: &Count, params: Vec<(String, String)>) -> Result<(Timestamp, Timestamp), Bytes> {
     // Sorted and deduplicated, like aaoracled's unknown_field detail.
     let unknown: BTreeSet<&str> =
         params.iter().map(|(name, _)| name.as_str()).filter(|name| !["from", "until"].contains(name)).collect();
     if !unknown.is_empty() {
         let names = unknown.into_iter().collect::<Vec<_>>().join(", ");
-        return Err(error_body("unknown_parameter", Some(&format!("GET /attestations does not accept: {names}"))));
+        let detail = format!("GET {} does not accept: {names}", operation.path);
+        return Err(error_body("unknown_parameter", Some(&detail)));
     }
 
     let (mut from, mut until) = (None, None);

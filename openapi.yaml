@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: aameterd
-  version: 0.1.0
+  version: 0.2.0
   summary: Live queries over aameterd's metering database.
   description: |
     aameterd serves two HTTP APIs, each on its own listener:
@@ -19,6 +19,34 @@ info:
     so nothing here mints, attests, asserts with or deletes anything on the
     device.
 
+    ## How calls are counted
+
+    Every counting operation here counts calls to one aaoracled operation
+    that aameterd received at or after `from` and strictly before `until`.
+
+    **Every call counts, whatever its outcome.** A call that aaoracled
+    rejected (400, 404, 502), or that never got an answer from it
+    (aameterd's own 502), counts the same as one that succeeded. These are
+    counts of what the app *asked for*.
+
+    A call's time is when aameterd **received** it (`requested_at`), not
+    when aaoracled answered. It is stored truncated to the millisecond, and
+    the bounds are compared with it as instants rather than as strings, so
+    they may carry any fractional precision.
+
+    **A call is recorded only once it finishes**: when aaoracled answers, or
+    when aameterd's upstream timeout expires (120 s by default). Until then
+    it is not counted. When it is recorded, it is counted at the time it
+    *arrived*, so the count for a window that has already closed can still go
+    up as calls that arrived inside it finish. A poller that needs final
+    counts should query a window again once the upstream timeout has passed
+    since its `until`.
+
+    ## Changelog
+
+    - **0.2.0**: added `GET /assertions`.
+    - **0.1.0**: `GET /attestations`.
+
 servers:
   - url: http://127.0.0.1:8183
     description: |
@@ -32,87 +60,114 @@ paths:
       summary: Count attestKey calls received in a time window.
       description: |
         The number of `attestKey` calls (`POST /keys/{keyId}/attest`, the
-        `key_attestations` table) that aameterd received at or after `from`
-        and strictly before `until`.
+        `key_attestations` table) received in the window, counted as
+        described under "How calls are counted" above.
 
-        **Every call counts, whatever its outcome.** A call that aaoracled
-        rejected (400, 404, 502), or that never got an answer from it
-        (aameterd's own 502), counts the same as one that issued an
-        attestation. This is how often the app *asked*, not how many
-        attestations Apple issued.
+        An app normally attests each key once, right after creating it, so
+        this counts keys being attested. Per-request activity shows up in
+        `GET /assertions` instead.
 
-        A call's time is when aameterd **received** it (`requested_at`), not
-        when aaoracled answered. It is stored truncated to the millisecond,
-        and the bounds are compared with it as instants rather than as
-        strings, so they may carry any fractional precision.
-
-        **A call is recorded only once it finishes**: when aaoracled answers,
-        or when aameterd's upstream timeout expires (120 s by default;
-        attestKey includes an Apple CA round trip). Until then it is not
-        counted. When it is recorded, it is counted at the time it *arrived*,
-        so the count for a window that has already closed can still go up as
-        calls that arrived inside it finish. A poller that needs final counts
-        should query a window again once the upstream timeout has passed
-        since its `until`.
+        attestKey includes an Apple CA round trip, so it is the operation
+        most likely to be in flight, and not yet counted, for a while.
 
         Only `attestKey` is counted. Databases from aameterd versions before
         aaoracled contract 0.3.0 also hold `createKey` calls that minted and
         attested in one request. Those are `createKey` calls, so they are not
         counted here.
       parameters:
-        - name: from
-          in: query
-          required: true
-          description: Start of the window, **inclusive**.
-          schema: { $ref: "#/components/schemas/Timestamp" }
-          example: "2026-10-11T19:07:53.846258Z"
-        - name: until
-          in: query
-          required: true
-          description: |
-            End of the window, **exclusive**. That way a poller can reuse one
-            window's `until` as the next one's `from`, and every call is
-            counted exactly once.
-
-            Equal to `from` is an empty window and counts `0`. Before `from`
-            is a `400`.
-          schema: { $ref: "#/components/schemas/Timestamp" }
-          example: "2026-10-11T19:08:53.846258Z"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/Until"
       responses:
         "200":
-          description: |
-            The count, as a bare JSON integer. The entire body is, e.g., `3`,
-            not wrapped in an object.
-          content:
-            application/json:
-              schema:
-                type: integer
-                minimum: 0
-              example: 3
+          $ref: "#/components/responses/Count"
         "400":
-          description: |
-            The query string is wrong. `error` is one of:
-
-            - `bad_request`: `from` or `until` is missing, sent more than
-              once, not a `Timestamp`, or `from` is after `until`. `detail`
-              says which.
-            - `unknown_parameter`: a parameter other than `from` and `until`
-              was sent; `detail` names it. The query string is closed, for the
-              same reason aaoracled's request bodies are: if a filter is added
-              later, an aameterd that predates it would otherwise drop it and
-              answer with an unfiltered count that looks like a filtered one.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+          $ref: "#/components/responses/BadRequest"
         "500":
-          description: |
-            The metering database could not be read
-            (`error: "database_error"`).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+          $ref: "#/components/responses/DatabaseError"
+
+  /assertions:
+    get:
+      operationId: countAssertions
+      summary: Count assertKey calls received in a time window.
+      description: |
+        The number of `assertKey` calls (`POST /keys/{keyId}/assert`, the
+        `key_assertions` table) received in the window, counted as described
+        under "How calls are counted" above.
+
+        An app asserts with an attested key on each request it protects, so
+        this is the count that follows the app's activity.
+
+        Only `assertKey` is counted. Before aaoracled contract 0.3.0 there
+        was no assertion operation. The `POST /keys/{key}/sign` calls that
+        older databases hold produced a bare signature, with no
+        `authenticatorData` and no counter. They are not assertions, so they
+        are not counted here.
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/Until"
+      responses:
+        "200":
+          $ref: "#/components/responses/Count"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/DatabaseError"
 
 components:
+  parameters:
+    From:
+      name: from
+      in: query
+      required: true
+      description: Start of the window, **inclusive**.
+      schema: { $ref: "#/components/schemas/Timestamp" }
+      example: "2026-10-11T19:07:53.846258Z"
+    Until:
+      name: until
+      in: query
+      required: true
+      description: |
+        End of the window, **exclusive**. That way a poller can reuse one
+        window's `until` as the next one's `from`, and every call is counted
+        exactly once.
+
+        Equal to `from` is an empty window and counts `0`. Before `from` is a
+        `400`.
+      schema: { $ref: "#/components/schemas/Timestamp" }
+      example: "2026-10-11T19:08:53.846258Z"
+
+  responses:
+    Count:
+      description: |
+        The count, as a bare JSON integer. The entire body is, e.g., `3`, not
+        wrapped in an object.
+      content:
+        application/json:
+          schema:
+            type: integer
+            minimum: 0
+          example: 3
+    BadRequest:
+      description: |
+        The query string is wrong. `error` is one of:
+
+        - `bad_request`: `from` or `until` is missing, sent more than once,
+          not a `Timestamp`, or `from` is after `until`. `detail` says which.
+        - `unknown_parameter`: a parameter other than `from` and `until` was
+          sent; `detail` names it. The query string is closed, for the same
+          reason aaoracled's request bodies are: if a filter is added later,
+          an aameterd that predates it would otherwise drop it and answer
+          with an unfiltered count that looks like a filtered one.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    DatabaseError:
+      description: |
+        The metering database could not be read (`error: "database_error"`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
   schemas:
     Timestamp:
       type: string

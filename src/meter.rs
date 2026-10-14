@@ -179,6 +179,13 @@ impl Action {
     }
 }
 
+/// An operation whose calls aameterd's own API counts.
+#[derive(Debug, Clone, Copy)]
+pub enum Counted {
+    AttestKey,
+    AssertKey,
+}
+
 #[derive(Clone)]
 pub struct Meter {
     conn: Arc<Mutex<Connection>>,
@@ -223,12 +230,16 @@ impl Meter {
         Ok(())
     }
 
-    /// Counts attestKey calls, whatever their outcome, whose `requested_at`
-    /// lies within `range`. The bounds are compared with `requested_at` as
-    /// text, which orders instants only because `requested_at` is
-    /// fixed-width, so give them in its exact layout. Blocking — call off
-    /// the async runtime.
-    pub fn count_attestations(&self, range: (Bound<&str>, Bound<&str>)) -> rusqlite::Result<i64> {
+    /// Counts calls to `operation`, whatever their outcome, whose
+    /// `requested_at` lies within `range`. The bounds are compared with
+    /// `requested_at` as text, which orders instants only because
+    /// `requested_at` is fixed-width, so give them in its exact layout.
+    /// Blocking — call off the async runtime.
+    pub fn count(&self, operation: Counted, range: (Bound<&str>, Bound<&str>)) -> rusqlite::Result<i64> {
+        let table = match operation {
+            Counted::AttestKey => "key_attestations",
+            Counted::AssertKey => "key_assertions",
+        };
         // A bound as SQL parameters: its value (NULL if unbounded) and
         // whether that value itself is in range.
         let params = |bound| match bound {
@@ -239,9 +250,11 @@ impl Meter {
         let ((start, start_included), (end, end_included)) = (params(range.0), params(range.1));
         let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         conn.query_row(
-            "SELECT count(*) FROM key_attestations
-             WHERE (?1 IS NULL OR requested_at > ?1 OR (?2 AND requested_at = ?1))
-               AND (?3 IS NULL OR requested_at < ?3 OR (?4 AND requested_at = ?3))",
+            &format!(
+                "SELECT count(*) FROM {table}
+                 WHERE (?1 IS NULL OR requested_at > ?1 OR (?2 AND requested_at = ?1))
+                   AND (?3 IS NULL OR requested_at < ?3 OR (?4 AND requested_at = ?3))"
+            ),
             rusqlite::params![start, start_included, end, end_included],
             |row| row.get(0),
         )

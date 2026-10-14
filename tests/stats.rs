@@ -52,10 +52,15 @@ impl Harness {
         (response.status().as_u16(), content_type, response.text().await.unwrap())
     }
 
-    /// The count for `from`/`until`, given raw (already query-encoded).
+    /// `GET /attestations`' count for `from`/`until`, given raw (already
+    /// query-encoded).
     async fn count(&self, from: &str, until: &str) -> i64 {
-        let (status, _, body) = self.get(&format!("/attestations?from={from}&until={until}")).await;
-        assert_eq!(status, 200, "{from} {until}: {body}");
+        self.count_at("/attestations", from, until).await
+    }
+
+    async fn count_at(&self, path: &str, from: &str, until: &str) -> i64 {
+        let (status, _, body) = self.get(&format!("{path}?from={from}&until={until}")).await;
+        assert_eq!(status, 200, "{path} {from} {until}: {body}");
         serde_json::from_str(&body).unwrap()
     }
 
@@ -81,6 +86,18 @@ fn attest() -> Action {
         client_data_hash: None,
         environment: None,
         attestation: None,
+    }
+}
+
+fn assert() -> Action {
+    Action::AssertKey {
+        key_id: "a2V5".into(),
+        app_id: None,
+        team_id: None,
+        bundle_id: None,
+        client_data_hash: None,
+        environment: None,
+        assertion: None,
     }
 }
 
@@ -135,8 +152,34 @@ async fn counts_attestations_received_in_the_window() {
 }
 
 #[tokio::test]
-async fn a_proxied_attest_is_counted() {
-    // An unreachable aaoracled still meters the call (as a 502), and the
+async fn counts_assertions_apart_from_attestations() {
+    let h = Harness::new().await;
+    h.record("2026-10-11T16:57:12.621Z", 200, attest());
+    for at in ["2026-10-11T16:57:14.218Z", "2026-10-11T16:57:15.000Z", "2026-10-11T16:57:15.001Z"] {
+        h.record(at, 200, assert());
+    }
+    // An assertion with an unattested key fails, and still counts.
+    h.record("2026-10-11T17:00:00.000Z", 502, assert());
+
+    let day = ("2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z");
+    assert_eq!(h.count_at("/assertions", day.0, day.1).await, 4);
+    assert_eq!(h.count_at("/attestations", day.0, day.1).await, 1);
+
+    // Same window semantics as /attestations.
+    let cases = [
+        ("2026-10-11T16:57:15Z", "2026-10-11T16:57:15.001Z", 1),
+        ("2026-10-11T16:57:15.0005Z", "2026-10-11T16:57:15.0015Z", 1),
+        ("2026-10-11T16:57:12.621Z", "2026-10-11T16:57:14.218Z", 0),
+        ("2026-10-11T17:00:00Z", "2026-10-11T17:00:00Z", 0),
+    ];
+    for (from, until, expected) in cases {
+        assert_eq!(h.count_at("/assertions", from, until).await, expected, "{from} {until}");
+    }
+}
+
+#[tokio::test]
+async fn proxied_calls_are_counted() {
+    // An unreachable aaoracled still meters each call (as a 502), and the
     // proxy and this server share one database.
     let h = Harness::new().await;
     let (listener, dead) = listen().await;
@@ -150,11 +193,15 @@ async fn a_proxied_attest_is_counted() {
     // Truncated like requested_at, or a call in the same millisecond as
     // `from` would rightly fall before it.
     let from = humantime::format_rfc3339_millis(SystemTime::now()).to_string();
-    let response = h.http.post(format!("http://{proxy_addr}/keys/a2V5/attest")).body("{}").send().await.unwrap();
-    assert_eq!(response.status(), 502);
+    for verb in ["attest", "assert", "assert"] {
+        let response =
+            h.http.post(format!("http://{proxy_addr}/keys/a2V5/{verb}")).body("{}").send().await.unwrap();
+        assert_eq!(response.status(), 502);
+    }
     let until = humantime::format_rfc3339_micros(SystemTime::now() + Duration::from_millis(1)).to_string();
 
-    assert_eq!(h.count(&from, &until).await, 1);
+    assert_eq!(h.count_at("/attestations", &from, &until).await, 1);
+    assert_eq!(h.count_at("/assertions", &from, &until).await, 2);
 }
 
 #[tokio::test]
@@ -163,21 +210,25 @@ async fn malformed_queries_are_rejected() {
     let bad_request = |detail: &str| (400, json!({ "error": "bad_request", "detail": detail }));
     let window = "from=2026-10-11T19:07:53Z&until=2026-10-11T19:07:54Z";
 
-    assert_eq!(h.error("/attestations").await, bad_request("from is required"));
-    assert_eq!(h.error("/attestations?from=2026-10-11T19:07:53Z").await, bad_request("until is required"));
-    assert_eq!(
-        h.error(&format!("/attestations?{window}&from=2026-10-11T19:07:52Z")).await,
-        bad_request("from must be sent only once")
-    );
-    assert_eq!(
-        h.error("/attestations?from=2026-10-11T19:07:54Z&until=2026-10-11T19:07:53.999999Z").await,
-        bad_request("from is after until")
-    );
-    assert_eq!(
-        h.error(&format!("/attestations?{window}&appId=x&limit=1&appId=y")).await,
-        (400, json!({ "error": "unknown_parameter", "detail": "GET /attestations does not accept: appId, limit" }))
-    );
+    for path in ["/attestations", "/assertions"] {
+        assert_eq!(h.error(path).await, bad_request("from is required"), "{path}");
+        assert_eq!(h.error(&format!("{path}?from=2026-10-11T19:07:53Z")).await, bad_request("until is required"));
+        assert_eq!(
+            h.error(&format!("{path}?{window}&from=2026-10-11T19:07:52Z")).await,
+            bad_request("from must be sent only once")
+        );
+        assert_eq!(
+            h.error(&format!("{path}?from=2026-10-11T19:07:54Z&until=2026-10-11T19:07:53.999999Z")).await,
+            bad_request("from is after until")
+        );
+        let detail = format!("GET {path} does not accept: appId, limit");
+        assert_eq!(
+            h.error(&format!("{path}?{window}&appId=x&limit=1&appId=y")).await,
+            (400, json!({ "error": "unknown_parameter", "detail": detail }))
+        );
+    }
 
+    // Timestamp parsing is shared, so one path covers both.
     let not_timestamps = [
         ("2026-10-11T19:07:53%2B00:00", "2026-10-11T19:07:53+00:00"),
         // A raw `+` is a space once decoded.
@@ -213,7 +264,7 @@ async fn malformed_queries_are_rejected() {
 #[tokio::test]
 async fn other_paths_are_not_found() {
     let h = Harness::new().await;
-    for path in ["/", "/attestations/", "/health", "/keys"] {
+    for path in ["/", "/attestations/", "/assertions/", "/health", "/keys"] {
         assert_eq!(h.error(path).await, (404, json!({ "error": "not_found" })), "{path}");
     }
 }

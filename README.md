@@ -66,10 +66,15 @@ curl 'http://127.0.0.1:8183/attestations?from=2026-10-11T19:00:00Z&until=2026-10
 ```
 
 returns how many attestKey calls arrived in that hour as a bare JSON
-integer, such as `3`. Every call counts, including ones that failed. A call
-is recorded only once it finishes, which can take as long as the upstream
-timeout (120 s by default). It is then counted at the time it arrived, so a
-window's count can still go up after the window has closed.
+integer, such as `3`. `/assertions` takes the same parameters and counts
+assertKey calls instead. An app usually attests each key once and then
+asserts on every request, so `/assertions` is the count that follows its
+activity.
+
+Every call counts, including ones that failed. A call is recorded only once
+it finishes, which can take as long as the upstream timeout (120 s by
+default). It is then counted at the time it arrived, so a window's count can
+still go up after the window has closed.
 
 ## License
 
