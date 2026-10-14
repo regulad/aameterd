@@ -290,8 +290,8 @@ fn str_field(value: Option<&Value>, key: &str) -> Option<String> {
     value?.get(key)?.as_str().map(str::to_owned)
 }
 
-/// The contract's `Error` schema.
-fn error_body(code: &str, detail: Option<&str>) -> Bytes {
+/// The contract's `Error` schema (aameterd's own contract reuses it).
+pub(crate) fn error_body(code: &str, detail: Option<&str>) -> Bytes {
     let body = match detail {
         Some(detail) => json!({ "error": code, "detail": detail }),
         None => json!({ "error": code }),
@@ -299,7 +299,7 @@ fn error_body(code: &str, detail: Option<&str>) -> Bytes {
     body.to_string().into()
 }
 
-fn json_response(status: StatusCode, body: Bytes) -> Response {
+pub(crate) fn json_response(status: StatusCode, body: Bytes) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 

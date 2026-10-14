@@ -55,6 +55,22 @@ The columns are documented in [`src/schema.sql`](src/schema.sql).
 sqlite3 aameterd.sqlite3 "SELECT requested_at, operation, source_ip, status FROM requests ORDER BY requested_at"
 ```
 
+## Live counts
+
+aameterd also serves its own read-only API over the metering database,
+[`openapi.yaml`](openapi.yaml), on `:8183` (`--stats-listen` /
+`AAMETERD_STATS_LISTEN`), so an app can be watched while it runs:
+
+```bash
+curl 'http://127.0.0.1:8183/attestations?from=2026-10-11T19:00:00Z&until=2026-10-11T20:00:00Z'
+```
+
+returns how many attestKey calls arrived in that hour as a bare JSON
+integer, such as `3`. Every call counts, including ones that failed. A call
+is recorded only once it finishes, which can take as long as the upstream
+timeout (120 s by default). It is then counted at the time it arrived, so a
+window's count can still go up after the window has closed.
+
 ## License
 
 All original work in this repository is licensed under

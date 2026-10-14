@@ -5,7 +5,9 @@
 -- Every table starts with the same columns:
 --
 --   requested_at     RFC 3339 UTC timestamp (ms precision) when aameterd
---                    received the request.
+--                    received the request. Always the fixed-width
+--                    YYYY-MM-DDTHH:MM:SS.mmmZ, truncated, so sorting it as
+--                    text sorts it by time; countAttestations relies on that.
 --   source_ip        Best guess at the client: the rightmost
 --                    X-Forwarded-For entry, else X-Real-Ip, else the TCP
 --                    peer's IP. Those headers are unverified and taken at

@@ -6,6 +6,7 @@ services:
       AAORACLED_HOST: ${AAORACLED_HOST:?set AAORACLED_HOST in .env to the aaoracled hostname or IP}
     ports:
       - "8182:8182"
+      - "8183:8183"
     volumes:
       - aameterd:/data
     restart: always

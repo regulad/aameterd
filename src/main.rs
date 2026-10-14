@@ -6,6 +6,8 @@ use std::time::Duration;
 use aameterd::Meter;
 use anyhow::Context;
 use clap::Parser;
+use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 /// Metering proxy for aaoracled: serves the same HTTP contract, forwards
@@ -16,6 +18,11 @@ struct Args {
     /// Address to serve the aaoracled contract on.
     #[arg(long, env = "AAMETERD_LISTEN", default_value = "127.0.0.1:8182")]
     listen: SocketAddr,
+
+    /// Address to serve aameterd's own contract on: live counts read from
+    /// the metering database.
+    #[arg(long, env = "AAMETERD_STATS_LISTEN", default_value = "127.0.0.1:8183")]
+    stats_listen: SocketAddr,
 
     /// Base URL of the real aaoracled (usually an SSH tunnel to the device).
     #[arg(long, env = "AAMETERD_UPSTREAM", default_value = "http://127.0.0.1:8181")]
@@ -40,18 +47,42 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let meter = Meter::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
-    let app = aameterd::router(args.upstream.as_str(), Duration::from_secs(args.upstream_timeout), meter)
+    let stats = aameterd::stats_router(meter.clone());
+    let proxy = aameterd::router(args.upstream.as_str(), Duration::from_secs(args.upstream_timeout), meter)
         .context("building upstream client")?;
 
-    let listener = tokio::net::TcpListener::bind(args.listen)
-        .await
-        .with_context(|| format!("binding {}", args.listen))?;
-    tracing::info!(listen = %args.listen, upstream = %args.upstream, db = %args.db.display(), "aameterd up");
+    // Both are bound before "up" is logged, so it means both are answering.
+    let proxy_listener = bind(args.listen).await?;
+    let stats_listener = bind(args.stats_listen).await?;
+    tracing::info!(
+        listen = %args.listen,
+        stats_listen = %args.stats_listen,
+        upstream = %args.upstream,
+        db = %args.db.display(),
+        "aameterd up"
+    );
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // One signal stops both servers, each after draining its own connections.
+    let (stop, stopped) = watch::channel(());
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        _ = stop.send(());
+    });
+    let shutdown = || {
+        let mut stopped = stopped.clone();
+        async move { _ = stopped.changed().await }
+    };
+    tokio::try_join!(
+        axum::serve(proxy_listener, proxy.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(shutdown())
+            .into_future(),
+        axum::serve(stats_listener, stats).with_graceful_shutdown(shutdown()).into_future(),
+    )?;
     Ok(())
+}
+
+async fn bind(addr: SocketAddr) -> anyhow::Result<TcpListener> {
+    TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))
 }
 
 /// Ctrl-C, or SIGTERM on Unix (what `docker stop` sends; as a container's

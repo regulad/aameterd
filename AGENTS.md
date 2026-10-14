@@ -22,13 +22,17 @@ Keep Git commit signing enabled; never disable it.
   update `src/proxy.rs`'s `Route` (and the metering in `action()`), plus the
   mock in `tests/proxy.rs`, to match.
 - **`openapi.yaml` here is aameterd's own contract, not a copy of
-  aaoracled's.** It defines the read-only API over the metering database,
-  served on a second listener (default `:8183`) that is separate from the
-  proxy's. aameterd owns this contract, so change `openapi.yaml` first, bump
-  its `info.version`, and then make the code match. Compare its timestamp
-  bounds with `requested_at` as instants, never as strings: `requested_at`
-  is text truncated to the millisecond, so `…53.846Z` sorts after
-  `…53.846258Z` even though it is earlier.
+  aaoracled's.** It defines the read-only API over the metering database.
+  `src/stats.rs` serves it on `--stats-listen` (default `:8183`), a listener
+  separate from the proxy's, and `tests/stats.rs` checks it. aameterd owns
+  this contract, so change `openapi.yaml` first, bump its `info.version`,
+  and then make the code match.
+- **Never compare a raw timestamp bound with `requested_at` as text.**
+  `requested_at` is fixed-width text truncated to the millisecond, so
+  `…53.846Z` sorts after `…53.846258Z` even though it is earlier.
+  `Timestamp` in `src/stats.rs` first converts a bound to `requested_at`'s
+  exact layout. Text comparison is correct only after that conversion, which
+  is why `requested_at`'s format must not change.
 - **`Route::parse` mirrors `oracled.m`'s `route()`, quirks included.** It
   matches on the raw, still-percent-encoded path and forwards the keyId or
   label segment byte-for-byte, so aaoracled does its own decoding. Don't
@@ -62,4 +66,5 @@ Keep Git commit signing enabled; never disable it.
 - `cargo run`: talks to whatever is on `--upstream` (default the device
   tunnel on `:8181`). Against the real device, `POST /keys` mints a real
   key, `POST /keys/{keyId}/attest` makes an Apple CA round trip, and
-  `DELETE /labels/{label}` really deletes a credential.
+  `DELETE /labels/{label}` really deletes a credential. The `--stats-listen`
+  server only reads the database and never reaches the device.
