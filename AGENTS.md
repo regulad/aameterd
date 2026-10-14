@@ -17,10 +17,18 @@ Keep Git commit signing enabled; never disable it.
 
 ## Rules
 
-- **The contract is `../aaoracled/openapi.yaml`; aameterd tracks 0.3.0.**
-  Don't fork a copy into this repo. If the contract changes there, update
-  `src/proxy.rs`'s `Route` (and the metering in `action()`), plus the mock
-  in `tests/proxy.rs`, to match.
+- **The proxy's contract is `../aaoracled/openapi.yaml`; aameterd tracks
+  0.3.0.** Don't fork a copy into this repo. If the contract changes there,
+  update `src/proxy.rs`'s `Route` (and the metering in `action()`), plus the
+  mock in `tests/proxy.rs`, to match.
+- **`openapi.yaml` here is aameterd's own contract, not a copy of
+  aaoracled's.** It defines the read-only API over the metering database,
+  served on a second listener (default `:8183`) that is separate from the
+  proxy's. aameterd owns this contract, so change `openapi.yaml` first, bump
+  its `info.version`, and then make the code match. Compare its timestamp
+  bounds with `requested_at` as instants, never as strings: `requested_at`
+  is text truncated to the millisecond, so `…53.846Z` sorts after
+  `…53.846258Z` even though it is earlier.
 - **`Route::parse` mirrors `oracled.m`'s `route()`, quirks included.** It
   matches on the raw, still-percent-encoded path and forwards the keyId or
   label segment byte-for-byte, so aaoracled does its own decoding. Don't
@@ -31,8 +39,10 @@ Keep Git commit signing enabled; never disable it.
   contract splits them into `/keys` and `/labels`); in the schema a keyId
   is always `key_id` and a label is always `label`, in `key_*` and
   `label_*` tables respectively.
-- **Metering never fails a request.** Log the error and return aaoracled's
-  answer anyway.
+- **Metering never fails a proxied request.** Log the error and return
+  aaoracled's answer anyway. aameterd's own API is the exception: its whole
+  job is reading the database, so a failed read is its
+  `500 database_error`.
 - **Schema changes go in `src/schema.sql`.** Every table keeps the shared
   leading columns, and so does the `requests` view. `CREATE ... IF NOT
   EXISTS` won't alter an existing table, so changing one also takes a new
