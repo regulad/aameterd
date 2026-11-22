@@ -6,9 +6,8 @@ _extends: .github
 repository:
   name: aameterd
   description: >-
-    Metering proxy for aaoracled: serves the same App Attest oracle HTTP
-    contract, forwards every request to a real aaoracled, and records each
-    one into SQLite for analyzing an app's devicecheckd traffic.
+    Metering proxy for aaoracled that records each App Attest oracle request
+    into SQLite
   homepage: ""
   private: false
   # Topics: comma-and-space separated string, NOT a YAML list.
