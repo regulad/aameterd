@@ -6,15 +6,6 @@ of the same authorized security research, and **aaoracled's scope
 constraints apply here unchanged**. See `README.md` for usage and the
 schema overview.
 
-## Commit requirements
-
-Every commit created or rewritten by an AI agent in this repository must
-carry a `Co-Authored-By` trailer naming the agent and model, for example:
-
-    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-
-Keep Git commit signing enabled; never disable it.
-
 ## Rules
 
 - **The proxy's contract is `../aaoracled/openapi.yaml`; aameterd tracks
